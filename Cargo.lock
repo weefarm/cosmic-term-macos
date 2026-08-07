@@ -1476,6 +1476,7 @@ dependencies = [
  "i18n-embed-fl",
  "icu",
  "indexmap",
+ "libc",
  "libcosmic",
  "log",
  "open",

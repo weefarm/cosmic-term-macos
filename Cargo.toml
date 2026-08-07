@@ -8,6 +8,7 @@ rust-version = "1.93"
 
 [dependencies]
 alacritty_terminal = "0.25.1"
+libc = "0.2"
 hex_color = { version = "3", features = ["serde"] }
 indexmap = "2"
 log = "0.4"
@@ -56,14 +57,17 @@ features = [
     "surface-message",
 ]
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))'.dependencies]
 fork = "0.4"
 
 [build-dependencies]
 xdgen = "0.1"
 
 [features]
-default = ["dbus-config", "wgpu", "wayland", "password_manager"]
+# Cross-platform defaults for macOS/Windows/Linux generic winit builds.
+# For the full COSMIC Linux desktop experience, build with `--features linux`.
+default = ["wgpu"]
+linux = ["wayland", "dbus-config", "password_manager"]
 dbus-config = ["libcosmic/dbus-config"]
 wgpu = ["libcosmic/wgpu", "cosmic-files/wgpu"]
 wayland = ["libcosmic/wayland", "cosmic-files/wayland"]

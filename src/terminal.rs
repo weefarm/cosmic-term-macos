@@ -27,7 +27,7 @@ use indexmap::IndexSet;
 use std::{
     borrow::Cow,
     collections::HashMap,
-    fs, io, mem,
+    io, mem,
     path::PathBuf,
     sync::{
         Arc, Mutex, Weak,
@@ -447,10 +447,37 @@ impl Terminal {
         #[cfg(target_os = "linux")]
         {
             let shell_pid = self.shell_pid?;
-            fs::read_link(format!("/proc/{shell_pid}/cwd")).ok()
+            std::fs::read_link(format!("/proc/{shell_pid}/cwd")).ok()
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            use std::ffi::{CStr, OsStr};
+            use std::os::unix::ffi::OsStrExt;
+
+            let shell_pid = self.shell_pid? as i32;
+            // Safety: `proc_vnodepathinfo` is a plain C struct of primitive/zeroed data,
+            // so zero-initializing it and calling `proc_pidinfo` is well-defined.
+            unsafe {
+                let mut info: libc::proc_vnodepathinfo = std::mem::zeroed();
+                let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
+                let pidinfo_size = libc::proc_pidinfo(
+                    shell_pid,
+                    libc::PROC_PIDVNODEPATHINFO,
+                    0,
+                    &mut info as *mut _ as *mut libc::c_void,
+                    size,
+                );
+                if pidinfo_size == size {
+                    let path = CStr::from_ptr(info.pvi_cdir.vip_path[0].as_ptr());
+                    Some(PathBuf::from(OsStr::from_bytes(path.to_bytes())))
+                } else {
+                    None
+                }
+            }
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             None
         }

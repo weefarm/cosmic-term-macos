@@ -143,9 +143,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Platform-specific daemonization logic
+    // Suppress "assigned but never read" warnings on platforms where daemonization
+    // is not supported (e.g. macOS).
+    let _ = daemonize;
 
-    #[cfg(all(unix, not(target_os = "redox")))]
+    // Platform-specific daemonization logic. Forking a Cocoa GUI process on macOS
+    // is unsafe and causes the window server to terminate the app, so it is disabled there.
+
+    #[cfg(all(unix, not(any(target_os = "redox", target_os = "macos"))))]
     if daemonize {
         match fork::daemon(true, true) {
             Ok(fork::Fork::Child) => (),
