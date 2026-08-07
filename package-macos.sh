@@ -13,10 +13,12 @@ echo "Building ${APP_BUNDLE} from ${TARGET_DIR}/${APP_NAME}..."
 
 rm -rf "${TARGET_DIR}/${APP_BUNDLE}"
 mkdir -p "${TARGET_DIR}/${APP_BUNDLE}/Contents/MacOS"
+mkdir -p "${TARGET_DIR}/${APP_BUNDLE}/Contents/Resources"
 
 cp "${TARGET_DIR}/${APP_NAME}" "${TARGET_DIR}/${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 chmod +x "${TARGET_DIR}/${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 cp "${RES_DIR}/Info.plist" "${TARGET_DIR}/${APP_BUNDLE}/Contents/Info.plist"
+cp "${RES_DIR}/cosmic-term.icns" "${TARGET_DIR}/${APP_BUNDLE}/Contents/Resources/cosmic-term.icns"
 
 # Validate the plist syntax
 plutil -lint "${TARGET_DIR}/${APP_BUNDLE}/Contents/Info.plist"

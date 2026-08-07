@@ -6,6 +6,8 @@
     <string>en</string>
     <key>CFBundleExecutable</key>
     <string>cosmic-term</string>
+    <key>CFBundleIconFile</key>
+    <string>cosmic-term.icns</string>
     <key>CFBundleIdentifier</key>
     <string>studio.weefarm.CosmicTerm</string>
     <key>CFBundleInfoDictionaryVersion</key>
