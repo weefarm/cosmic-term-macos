@@ -31,6 +31,21 @@ Run the terminal with:
 ./target/release/cosmic-term --no-daemon
 ```
 
+## Packaging as a macOS app
+
+On macOS, double-clicking the raw Unix binary in Finder opens it in `Terminal.app`.
+To get a normal app that launches from Finder, Dock, or Launchpad, package it as
+an `.app` bundle and copy it to `/Applications`:
+
+```bash
+cargo build --release
+./package-macos.sh
+cp -R target/release/cosmic-term.app /Applications/
+```
+
+The first time you open it, right-click the app and choose **Open** so macOS
+allows the unsigned/ad-hoc-signed app. After that it opens like any other app.
+
 ## Branches
 
 - `main` — macOS port (default)
