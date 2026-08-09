@@ -489,6 +489,7 @@ fn fallback_shortcuts() -> Shortcuts {
     bind!([Ctrl, Shift], "F", Find);
     #[cfg(target_os = "macos")]
     {
+        bind!([Super], "a", SelectAll);
         bind!([Super], "n", WindowNew);
         bind!([Super], "q", WindowClose);
         bind!([Super], "t", TabNew);
@@ -500,6 +501,7 @@ fn fallback_shortcuts() -> Shortcuts {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        bind!([Ctrl, Shift], "A", SelectAll);
         bind!([Ctrl, Shift], "N", WindowNew);
         bind!([Ctrl, Shift], "Q", WindowClose);
         bind!([Ctrl, Shift], "T", TabNew);
