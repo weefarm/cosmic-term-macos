@@ -6,7 +6,7 @@ use cosmic::{
     iced::keyboard::{Key, Modifiers},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{Action, fl};
 
@@ -181,6 +181,10 @@ impl ShortcutsConfig {
         let mut binds = HashMap::new();
         insert_shortcuts(&self.defaults, &mut binds, false);
         insert_shortcuts(&self.custom, &mut binds, true);
+
+        #[cfg(target_os = "macos")]
+        enforce_macos_cmd_shortcuts(&mut binds);
+
         binds
     }
 
@@ -402,6 +406,40 @@ pub fn binding_from_key(modifiers: Modifiers, key: Key) -> Option<Binding> {
         modifiers: binding_modifiers,
         key,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn enforce_macos_cmd_shortcuts(binds: &mut HashMap<KeyBind, Action>) {
+    let mut default_binds = HashMap::new();
+    let defaults = fallback_shortcuts();
+    insert_shortcuts(&defaults, &mut default_binds, false);
+
+    // The macOS Cmd+ defaults are the Super-only bindings.
+    let super_only_defaults: HashMap<KeyBind, Action> = default_binds
+        .into_iter()
+        .filter(|(key_bind, _)| {
+            key_bind.modifiers.len() == 1
+                && key_bind.modifiers.first() == Some(&Modifier::Super)
+        })
+        .collect();
+
+    // Ensure the canonical Cmd+ keys map to the canonical actions.
+    for (key_bind, action) in &super_only_defaults {
+        binds.insert(key_bind.clone(), *action);
+    }
+
+    let default_keys: HashSet<KeyBind> = super_only_defaults.keys().cloned().collect();
+    let macos_cmd_actions: Vec<Action> = super_only_defaults.values().copied().collect();
+
+    let mut to_remove = Vec::new();
+    for (key_bind, action) in binds.iter() {
+        if macos_cmd_actions.contains(action) && !default_keys.contains(key_bind) {
+            to_remove.push(key_bind.clone());
+        }
+    }
+    for key_bind in to_remove {
+        binds.remove(&key_bind);
+    }
 }
 
 fn insert_shortcuts(

@@ -1,0 +1,31 @@
+diff --git a/src/widget/menu/key_bind.rs b/src/widget/menu/key_bind.rs
+index 2202125..a9c7fb1 100644
+--- a/src/widget/menu/key_bind.rs
++++ b/src/widget/menu/key_bind.rs
+@@ -142,8 +142,24 @@ fn physical_key_to_latin(physical_key: &Physical) -> Option<Key> {
+ 
+ impl fmt::Display for KeyBind {
+     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+-        for modifier in self.modifiers.iter() {
+-            write!(f, "{:?} + ", modifier)?;
++        let mac = cfg!(target_os = "macos");
++        for (i, modifier) in self.modifiers.iter().enumerate() {
++            if mac {
++                match modifier {
++                    Modifier::Super => write!(f, "⌘")?,
++                    Modifier::Ctrl => write!(f, "⌃")?,
++                    Modifier::Alt => write!(f, "⌥")?,
++                    Modifier::Shift => write!(f, "⇧")?,
++                }
++            } else {
++                write!(f, "{:?}", modifier)?;
++                if i < self.modifiers.len() - 1 {
++                    write!(f, " + ")?;
++                }
++            }
++        }
++        if !mac && !self.modifiers.is_empty() {
++            write!(f, " + ")?;
+         }
+         match &self.key {
+             Key::Character(c) if c.as_str() == " " => write!(f, "Space"),
