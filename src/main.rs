@@ -2206,16 +2206,18 @@ impl Application for App {
             .name(fl!("cosmic-terminal"))
             .icon(widget::icon::from_name(Self::APP_ID))
             .version(env!("CARGO_PKG_VERSION"))
-            .author("System76")
+            .author("weefarm (macOS port)")
             .comments(fl!("comment"))
+            .copyright("A macOS port of COSMIC Terminal by weefarm. Original by System76.")
             .license("GPL-3.0-only")
             .license_url("https://spdx.org/licenses/GPL-3.0-only")
             .developers([("Jeremy Soller", "jeremy@system76.com")])
             .links([
-                (fl!("repository"), "https://github.com/pop-os/cosmic-term"),
+                ("weefarm", "https://github.com/weefarm"),
+                (fl!("repository").as_str(), "https://github.com/weefarm/cosmic-term-macos"),
                 (
-                    fl!("support"),
-                    "https://github.com/pop-os/cosmic-term/issues",
+                    fl!("support").as_str(),
+                    "https://github.com/weefarm/cosmic-term-macos/issues",
                 ),
             ]);
 
