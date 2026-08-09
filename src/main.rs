@@ -206,6 +206,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut settings = Settings::default();
     settings = settings.theme(config.app_theme.theme());
     settings = settings.size_limits(Limits::NONE.min_width(360.0).min_height(180.0));
+    settings = settings.exit_on_close(false);
 
     // Flags
     let flags = Flags {
@@ -447,16 +448,18 @@ pub enum Message {
     TabNewNoProfile,
     TabNext,
     TabPrev,
-    TermEvent(pane_grid::Pane, segmented_button::Entity, TermEvent),
-    TermEventTx(mpsc::UnboundedSender<(pane_grid::Pane, segmented_button::Entity, TermEvent)>),
+    TermEvent(window::Id, pane_grid::Pane, segmented_button::Entity, TermEvent),
+    TermEventTx(mpsc::UnboundedSender<(window::Id, pane_grid::Pane, segmented_button::Entity, TermEvent)>),
     ToggleFullscreen,
     ToggleContextPage(ContextPage),
     UpdateDefaultProfile((bool, ProfileId)),
     UseBrightBold(bool),
     WindowClose,
+    WindowClosed(window::Id),
     WindowNew,
-    WindowFocused,
-    WindowUnfocused,
+    WindowOpened(window::Id),
+    WindowFocused(window::Id),
+    WindowUnfocused(window::Id),
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -481,11 +484,36 @@ struct ShortcutConflict {
     new_action: shortcuts::KeyBindAction,
 }
 
+/// Per-window terminal state.
+struct WindowState {
+    pane_model: TerminalPaneGrid,
+    terminal_ids: HashMap<pane_grid::Pane, widget::Id>,
+}
+
+impl WindowState {
+    fn new() -> Self {
+        let pane_model = TerminalPaneGrid::new(segmented_button::ModelBuilder::default().build());
+        let mut terminal_ids = HashMap::new();
+        terminal_ids.insert(pane_model.focused(), widget::Id::unique());
+        Self {
+            pane_model,
+            terminal_ids,
+        }
+    }
+}
+
 /// The [`App`] stores application-specific state.
 pub struct App {
     core: Core,
     about: About,
+    /// Active window's pane model (must match `active_window_id`).
     pane_model: TerminalPaneGrid,
+    /// Active window's terminal widget ids (must match `active_window_id`).
+    terminal_ids: HashMap<pane_grid::Pane, widget::Id>,
+    /// Other open windows, keyed by `window::Id`.
+    windows: HashMap<window::Id, WindowState>,
+    active_window_id: window::Id,
+    main_window_id: window::Id,
     config_handler: Option<cosmic_config::Config>,
     config: Config,
     shortcuts_config: shortcuts::ShortcutsConfig,
@@ -508,12 +536,11 @@ pub struct App {
     themes: HashMap<(String, ColorSchemeKind), TermColors>,
     context_page: ContextPage,
     dialog_opt: Option<Dialog<Message>>,
-    terminal_ids: HashMap<pane_grid::Pane, widget::Id>,
     find: bool,
     find_search_id: widget::Id,
     find_search_value: String,
     term_event_tx_opt:
-        Option<mpsc::UnboundedSender<(pane_grid::Pane, segmented_button::Entity, TermEvent)>>,
+        Option<mpsc::UnboundedSender<(window::Id, pane_grid::Pane, segmented_button::Entity, TermEvent)>>,
     startup_options: Option<tty::Options>,
     term_config: term::Config,
     color_scheme_errors: Vec<String>,
@@ -544,6 +571,329 @@ pub struct App {
 }
 
 impl App {
+    /// Creates the view for a given window.
+    fn window_view(&self, window_id: window::Id) -> Element<'_, Message> {
+        let (pane_model, terminal_ids) = self.state_for_view(window_id);
+
+        let t = self.core().system_theme();
+        let cosmic = t.cosmic();
+        let cosmic_theme::Spacing {
+            space_xxxs,
+            space_xxs,
+            ..
+        } = cosmic.spacing;
+
+        let show_pane_borders =
+            self.config.show_pane_borders && pane_model.panes.panes.len() > 1;
+        let pane_corner_radius: iced::border::Radius = {
+            let pad = f32::from(space_xxxs) / 2.0;
+            cosmic
+                .radius_s()
+                .map(|r| if r > 0.0 { r + pad } else { 0.0 })
+                .into()
+        };
+        let pane_grid = PaneGrid::new(&pane_model.panes, move |pane, tab_model, _is_maximized| {
+            let mut tab_column = widget::column::with_capacity(1);
+
+            if tab_model.iter().count() > 1 {
+                tab_column = tab_column.push(
+                    widget::container(
+                        widget::tab_bar::horizontal(tab_model)
+                            .enable_tab_drag(String::from("x-cosmic-term/tab"))
+                            .on_reorder(move |event| Message::ReorderTab(pane, event))
+                            .tab_drag_threshold(25.)
+                            .button_height(32)
+                            .button_spacing(space_xxs)
+                            .on_activate(Message::TabActivate)
+                            .on_close(|entity| Message::TabClose(Some(entity))),
+                    )
+                    .class(style::Container::Custom(Box::new(|theme| {
+                        let cosmic = theme.cosmic();
+                        cosmic::iced::widget::container::Style {
+                            icon_color: Some(Color::from(cosmic.background(theme.transparent).on)),
+                            text_color: Some(Color::from(cosmic.background(theme.transparent).on)),
+                            background: Some(iced::Background::Color(
+                                cosmic.background(theme.transparent).base.into(),
+                            )),
+                            border: iced::Border::default(),
+                            shadow: iced::Shadow::default(),
+                            snap: true,
+                        }
+                    })))
+                    .width(Length::Fill),
+                );
+            }
+
+            let entity = tab_model.active();
+            let entity_middle_click = tab_model.active();
+            let terminal_id = terminal_ids
+                .get(&pane)
+                .cloned()
+                .unwrap_or_else(widget::Id::unique);
+            if let Some(terminal) = tab_model.data::<Mutex<Terminal>>(entity) {
+                let mut terminal_box = terminal_box(terminal, &self.key_binds)
+                    .id(terminal_id)
+                    .disabled(self.core.window.show_context)
+                    .on_context_menu(move |menu_state| Message::TabContextMenu(pane, menu_state))
+                    .on_middle_click(move || Message::MiddleClick(pane, Some(entity_middle_click)))
+                    .on_open_hyperlink(Some(Box::new(Message::LaunchUrl)))
+                    .on_window_focused(move || Message::WindowFocused(window_id))
+                    .on_window_unfocused(move || Message::WindowUnfocused(window_id))
+                    .opacity(if t.transparent {
+                        t.cosmic().alpha_map.blurred_alpha(t.cosmic().frosted)
+                    } else {
+                        self.config.opacity_ratio()
+                    })
+                    .padding(space_xxs)
+                    .sharp_corners(self.core.window.sharp_corners)
+                    .show_headerbar(self.config.show_headerbar)
+                    .pane_border_radius(show_pane_borders.then_some(pane_corner_radius))
+                    .border(pane_border(cosmic, t.transparent, show_pane_borders));
+
+                if self.config.focus_follow_mouse {
+                    terminal_box = terminal_box.on_mouse_enter(move || Message::MouseEnter(pane));
+                }
+
+                // If a context menu popup is active for this pane, inform the
+                // terminal_box so it will emit on_context_menu(None) on click
+                // to dismiss the popup.
+                if self.context_menu_popup.is_some() {
+                    terminal_box = terminal_box.context_menu(cosmic::iced::Point::ORIGIN);
+                }
+
+                let use_wayland_popup = {
+                    #[cfg(feature = "wayland")]
+                    {
+                        is_wayland()
+                    }
+                    #[cfg(not(feature = "wayland"))]
+                    {
+                        false
+                    }
+                };
+
+                let tab_element: Element<'_, Message> = if !use_wayland_popup {
+                    // Fallback: render context menu as an inline popover
+                    if let Some((_, popup_pane, popup_entity, ref link, _, point)) =
+                        self.context_menu_popup
+                    {
+                        if pane == popup_pane {
+                            let mut popover = widget::popover(terminal_box.context_menu(point));
+                            popover = popover
+                                .popup(menu::context_menu(
+                                    &self.config,
+                                    &self.key_binds,
+                                    popup_entity,
+                                    link.clone(),
+                                ))
+                                .position(widget::popover::Position::Point(point));
+                            popover.into()
+                        } else {
+                            terminal_box.into()
+                        }
+                    } else {
+                        terminal_box.into()
+                    }
+                } else {
+                    terminal_box.into()
+                };
+                tab_column = tab_column.push(tab_element);
+            }
+
+            //Only draw find in the currently focused pane
+            if self.find && pane == pane_model.focused() {
+                let find_input = widget::text_input::text_input(
+                    fl!("find-placeholder"),
+                    &self.find_search_value,
+                )
+                .id(self.find_search_id.clone())
+                .on_input(Message::FindSearchValueChanged)
+                // This is inverted for ease of use, usually in terminals you want to search
+                // upwards, which is FindPrevious
+                .on_submit(|_| {
+                    if self.modifiers.contains(Modifiers::SHIFT) {
+                        Message::FindNext
+                    } else {
+                        Message::FindPrevious
+                    }
+                })
+                .width(Length::Fixed(320.0))
+                .trailing_icon(
+                    button::custom(icon_cache_get("edit-clear-symbolic", 16))
+                        .on_press(Message::FindSearchValueChanged(String::new()))
+                        .class(style::Button::Icon)
+                        .into(),
+                );
+                let find_widget = widget::row::with_children(vec![
+                    find_input.into(),
+                    widget::tooltip(
+                        button::custom(icon_cache_get("go-up-symbolic", 16))
+                            .on_press(Message::FindPrevious)
+                            .padding(space_xxs)
+                            .class(style::Button::Icon),
+                        widget::text::body(fl!("find-previous")),
+                        widget::tooltip::Position::Top,
+                    )
+                    .into(),
+                    widget::tooltip(
+                        button::custom(icon_cache_get("go-down-symbolic", 16))
+                            .on_press(Message::FindNext)
+                            .padding(space_xxs)
+                            .class(style::Button::Icon),
+                        widget::text::body(fl!("find-next")),
+                        widget::tooltip::Position::Top,
+                    )
+                    .into(),
+                    widget::space::horizontal().into(),
+                    button::custom(icon_cache_get("window-close-symbolic", 16))
+                        .on_press(Message::Find(false))
+                        .padding(space_xxs)
+                        .class(style::Button::Icon)
+                        .into(),
+                ])
+                .align_y(Alignment::Center)
+                .padding(space_xxs)
+                .spacing(space_xxs);
+
+                tab_column = tab_column
+                    .push(widget::layer_container(find_widget).layer(cosmic_theme::Layer::Primary));
+            } else {
+                // TODO
+            }
+
+            DndDestination::for_data::<DndDrop>(tab_column, move |data, action| {
+                if let Some(data) = data {
+                    if action == DndAction::Move {
+                        Message::Drop(Some((pane, entity, data)))
+                    } else {
+                        log::warn!("unsuppported action: {:?}", action);
+                        Message::Drop(None)
+                    }
+                } else {
+                    Message::Drop(None)
+                }
+            })
+            .apply(pane_grid::Content::new)
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .on_click(Message::PaneClicked)
+        .on_resize(space_xxs, Message::PaneResized)
+        .on_drag(Message::PaneDragged);
+
+        //TODO: apply window border radius xs at bottom of window
+        if show_pane_borders {
+            // Each pane draws its own border stroke. Painting a filled
+            // container behind the grid instead would stack its alpha with the
+            // translucent panes and wash out the blurred backdrop.
+            pane_grid.spacing(space_xxxs).into()
+        } else {
+            pane_grid.into()
+        }
+    }
+
+    fn is_placeholder_window(&self, id: window::Id) -> bool {
+        id == window::Id::NONE || id == window::Id::RESERVED
+    }
+
+    fn load_window_state(&mut self, id: window::Id) {
+        if id == self.active_window_id || self.is_placeholder_window(id) {
+            return;
+        }
+
+        let active_is_placeholder = self.is_placeholder_window(self.active_window_id);
+
+        // Store current active state only if it's a real window
+        if !active_is_placeholder {
+            let mut prev = WindowState::new();
+            std::mem::swap(&mut prev.pane_model, &mut self.pane_model);
+            std::mem::swap(&mut prev.terminal_ids, &mut self.terminal_ids);
+            self.windows.insert(self.active_window_id, prev);
+        }
+
+        // Load target window state
+        if let Some(mut next) = self.windows.remove(&id) {
+            std::mem::swap(&mut next.pane_model, &mut self.pane_model);
+            std::mem::swap(&mut next.terminal_ids, &mut self.terminal_ids);
+        } else if active_is_placeholder {
+            // The current pane_model/terminal_ids belong to the first real window;
+            // keep them and associate them with the target id.
+        } else {
+            // Target window has no state yet; create empty
+            self.pane_model = TerminalPaneGrid::new(segmented_button::ModelBuilder::default().build());
+            self.terminal_ids.clear();
+            self.terminal_ids.insert(self.pane_model.focused(), widget::Id::unique());
+        }
+
+        self.active_window_id = id;
+    }
+
+    fn sync_active_window(&mut self) {
+        if let Some(focused) = self.core.focused_window() {
+            if !self.is_placeholder_window(focused) {
+                self.load_window_state(focused);
+            }
+        } else if !self.is_placeholder_window(self.main_window_id)
+            && self.active_window_id == window::Id::NONE
+        {
+            self.active_window_id = self.main_window_id;
+        }
+
+        if self.is_placeholder_window(self.main_window_id) {
+            if let Some(main) = self.core.main_window_id() {
+                if !self.is_placeholder_window(main) {
+                    self.main_window_id = main;
+                }
+            }
+        }
+    }
+
+    fn state_for_view(&self, id: window::Id) -> (&TerminalPaneGrid, &HashMap<pane_grid::Pane, widget::Id>) {
+        if id == self.active_window_id {
+            (&self.pane_model, &self.terminal_ids)
+        } else {
+            let state = self.windows.get(&id).unwrap();
+            (&state.pane_model, &state.terminal_ids)
+        }
+    }
+
+    fn close_tab(&mut self, entity_opt: Option<segmented_button::Entity>) -> Task<Message> {
+        if let Some(tab_model) = self.pane_model.active_mut() {
+            let entity = entity_opt.unwrap_or_else(|| tab_model.active());
+
+            // Activate closest item if closing active tab
+            if entity == tab_model.active()
+                && let Some(position) = tab_model.position(entity)
+            {
+                if position > 0 {
+                    tab_model.activate_position(position - 1);
+                } else {
+                    tab_model.activate_position(position + 1);
+                }
+            }
+
+            // Remove item
+            tab_model.remove(entity);
+
+            // If that was the last tab, close current pane
+            if tab_model.iter().next().is_none() {
+                if let Some((_state, sibling)) =
+                    self.pane_model.panes.close(self.pane_model.focused())
+                {
+                    self.terminal_ids.remove(&self.pane_model.focused());
+                    self.pane_model.set_focus(sibling);
+                } else {
+                    // Last pane, closing the active window
+                    if self.active_window_id != window::Id::NONE {
+                        return window::close(self.active_window_id);
+                    }
+                }
+            }
+        }
+
+        self.update_title(None)
+    }
+
     fn theme_names(&self, color_scheme_kind: ColorSchemeKind) -> &Vec<String> {
         match color_scheme_kind {
             ColorSchemeKind::Dark => &self.theme_names_dark,
@@ -805,8 +1155,8 @@ impl App {
             };
             self.set_header_title(header_title);
             Task::batch([
-                if let Some(window_id) = self.core.main_window_id() {
-                    self.set_window_title(window_title, window_id)
+                if self.active_window_id != window::Id::NONE {
+                    self.set_window_title(window_title, self.active_window_id)
                 } else {
                     Task::none()
                 },
@@ -815,8 +1165,8 @@ impl App {
         } else {
             log::error!("Failed to get the specific pane");
             Task::batch([
-                if let Some(window_id) = self.core.main_window_id() {
-                    self.set_window_title(fl!("cosmic-terminal"), window_id)
+                if self.active_window_id != window::Id::NONE {
+                    self.set_window_title(fl!("cosmic-terminal"), self.active_window_id)
                 } else {
                     Task::none()
                 },
@@ -1637,6 +1987,7 @@ impl App {
                                 .activate()
                                 .id();
                             match Terminal::new(
+                                self.active_window_id,
                                 current_pane,
                                 entity,
                                 term_event_tx.clone(),
@@ -1681,7 +2032,7 @@ impl App {
                                 Err(err) => {
                                     log::error!("failed to open terminal: {}", err);
                                     // Clean up partially created tab
-                                    return self.update(Message::TabClose(Some(entity)));
+                                    return self.close_tab(Some(entity));
                                 }
                             }
                         } else {
@@ -1842,6 +2193,13 @@ impl Application for App {
         let mut terminal_ids = HashMap::new();
         terminal_ids.insert(pane_model.focused(), widget::Id::unique());
 
+        let active_window_id = core
+            .main_window_id()
+            .filter(|id| *id != window::Id::RESERVED)
+            .unwrap_or(window::Id::NONE);
+        let main_window_id = active_window_id;
+        let windows = HashMap::new();
+
         let about = About::default()
             .name(fl!("cosmic-terminal"))
             .icon(widget::icon::from_name(Self::APP_ID))
@@ -1864,6 +2222,10 @@ impl Application for App {
             core,
             about,
             pane_model,
+            terminal_ids,
+            windows,
+            active_window_id,
+            main_window_id,
             config_handler: flags.config_handler,
             config: flags.config,
             shortcuts_config: flags.shortcuts_config,
@@ -1886,7 +2248,6 @@ impl Application for App {
             themes: HashMap::new(),
             context_page: ContextPage::Settings,
             dialog_opt: None,
-            terminal_ids,
             find: false,
             find_search_id: widget::Id::unique(),
             find_search_value: String::new(),
@@ -1960,6 +2321,10 @@ impl Application for App {
 
     /// Handle application events here.
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
+        // Ensure the active-window state matches the focused window before
+        // handling messages that operate on self.pane_model / self.terminal_ids.
+        self.sync_active_window();
+
         // Helper for updating config values efficiently
         macro_rules! config_set {
             ($name: ident, $value: expr) => {
@@ -2248,7 +2613,7 @@ impl Application for App {
                 return self.update_focus();
             }
             Message::ToggleFullscreen => {
-                if let Some(window_id) = self.core.main_window_id() {
+                if let Some(window_id) = self.core.focused_window().or(Some(self.active_window_id)) {
                     return cosmic::command::toggle_maximize(window_id);
                 }
             }
@@ -2853,40 +3218,7 @@ impl Application for App {
                 }
             }
             Message::TabClose(entity_opt) => {
-                if let Some(tab_model) = self.pane_model.active_mut() {
-                    let entity = entity_opt.unwrap_or_else(|| tab_model.active());
-
-                    // Activate closest item if closing active tab
-                    if entity == tab_model.active()
-                        && let Some(position) = tab_model.position(entity)
-                    {
-                        if position > 0 {
-                            tab_model.activate_position(position - 1);
-                        } else {
-                            tab_model.activate_position(position + 1);
-                        }
-                    }
-
-                    // Remove item
-                    tab_model.remove(entity);
-
-                    // If that was the last tab, close current pane
-                    if tab_model.iter().next().is_none() {
-                        if let Some((_state, sibling)) =
-                            self.pane_model.panes.close(self.pane_model.focused())
-                        {
-                            self.terminal_ids.remove(&self.pane_model.focused());
-                            self.pane_model.set_focus(sibling);
-                        } else {
-                            //Last pane, closing window
-                            if let Some(window_id) = self.core.main_window_id() {
-                                return window::close(window_id);
-                            }
-                        }
-                    }
-                }
-
-                return self.update_title(None);
+                return self.close_tab(entity_opt);
             }
             Message::TabContextAction(entity, action) => {
                 // Close context menu popup
@@ -3052,7 +3384,11 @@ impl Application for App {
                     }
                 }
             }
-            Message::TermEvent(pane, entity, event) => {
+            Message::TermEvent(window_id, pane, entity, event) => {
+                // Route this event to the window that produced it.
+                self.active_window_id = window_id;
+                self.sync_active_window();
+
                 match event {
                     TermEvent::Bell => {
                         //TODO: audible or visible bell options?
@@ -3096,7 +3432,7 @@ impl Application for App {
                         //TODO: should we blink the cursor?
                     }
                     TermEvent::Exit => {
-                        return self.update(Message::TabClose(Some(entity)));
+                        return self.close_tab(Some(entity));
                     }
                     TermEvent::PtyWrite(text) => {
                         if let Some(tab_model) = self.pane_model.panes.get(pane)
@@ -3253,38 +3589,80 @@ impl Application for App {
                 config_set!(default_profile, default.then_some(profile_id));
             }
             Message::WindowClose => {
-                if let Some(window_id) = self.core.main_window_id() {
+                if let Some(window_id) = self.core.focused_window().or_else(|| self.core.main_window_id()) {
                     return window::close(window_id);
                 }
             }
-            Message::WindowNew => match env::current_exe() {
-                Ok(exe) => {
-                    let mut command = process::Command::new(&exe);
-                    if self.config.tab_new_inherit_working_directory
-                        && let Some(dir) = self.active_terminal_working_directory()
-                    {
-                        command.arg("--working-directory");
-                        command.arg(dir);
-                    }
-                    match command.spawn() {
-                        Ok(_child) => {}
-                        Err(err) => {
-                            log::error!("failed to execute {:?}: {}", exe, err);
+            Message::WindowClosed(id) => {
+                self.windows.remove(&id);
+                if id == self.main_window_id {
+                    self.main_window_id = window::Id::NONE;
+                }
+                if self.windows.is_empty() && self.core.main_window_id().is_none() {
+                    return cosmic::iced::exit();
+                }
+            }
+            Message::WindowNew => {
+                #[cfg(target_os = "macos")]
+                {
+                    let (id, open_task) = window::open(window::Settings::default());
+
+                    let title_task = self.set_window_title(fl!("cosmic-terminal"), id);
+
+                    return Task::batch([
+                        open_task.map(move |_| cosmic::Action::App(Message::WindowOpened(id))),
+                        title_task,
+                    ]);
+                }
+                #[cfg(not(target_os = "macos"))]
+                match env::current_exe() {
+                    Ok(exe) => {
+                        let mut command = process::Command::new(&exe);
+                        if self.config.tab_new_inherit_working_directory
+                            && let Some(dir) = self.active_terminal_working_directory()
+                        {
+                            command.arg("--working-directory");
+                            command.arg(dir);
+                        }
+                        match command.spawn() {
+                            Ok(_child) => {}
+                            Err(err) => {
+                                log::error!("failed to execute {:?}: {}", exe, err);
+                            }
                         }
                     }
+                    Err(err) => {
+                        log::error!("failed to get current executable path: {}", err);
+                    }
                 }
-                Err(err) => {
-                    log::error!("failed to get current executable path: {}", err);
+            }
+            Message::WindowOpened(id) => {
+                self.load_window_state(id);
+                if self.is_placeholder_window(self.main_window_id) {
+                    self.main_window_id = id;
+                    self.core_mut().set_main_window_id(Some(id));
                 }
-            },
-            Message::WindowFocused => {
+                return self.create_and_focus_new_terminal(
+                    self.pane_model.focused(),
+                    self.get_default_profile(),
+                    false,
+                );
+            }
+            Message::WindowFocused(id) => {
+                self.load_window_state(id);
+                if self.is_placeholder_window(self.main_window_id) {
+                    self.main_window_id = id;
+                    self.core_mut().set_main_window_id(Some(id));
+                }
                 if !self.core.window.show_context {
                     self.pane_model.update_terminal_focus();
                 }
                 return self.update_focus();
             }
-            Message::WindowUnfocused => {
-                self.pane_model.unfocus_all_terminals();
+            Message::WindowUnfocused(id) => {
+                if self.active_window_id == id {
+                    self.pane_model.unfocus_all_terminals();
+                }
             }
             Message::ZoomIn => {
                 return self.update_render_active_pane_zoom(message);
@@ -3438,230 +3816,51 @@ impl Application for App {
             )
             .into();
         }
+        if self.windows.contains_key(&window_id)
+            || window_id == self.main_window_id
+            || window_id == self.active_window_id
+        {
+            let focused = self.core.focused_window() == Some(window_id);
+            let view = self.window_view(window_id);
+
+            if self.core.window.show_headerbar {
+                let mut header = widget::header_bar()
+                    .focused(focused)
+                    .maximized(self.core.window.is_maximized)
+                    .sharp_corners(self.core.window.sharp_corners)
+                    .title(&self.core.window.header_title)
+                    .on_close(Message::WindowClose)
+                    .on_maximize(Message::ToggleFullscreen);
+
+                for element in self.header_start() {
+                    header = header.start(element);
+                }
+
+                for element in self.header_end() {
+                    header = header.end(element);
+                }
+
+                return widget::column::with_children(vec![header.into(), view])
+                    .into();
+            }
+
+            return view;
+        }
         match &self.dialog_opt {
             Some(dialog) => dialog.view(window_id),
             None => widget::text("Unknown window ID").into(),
         }
     }
 
-    /// Creates a view after each update.
+    /// Creates a view after each update for the active/main window.
+
     fn view(&self) -> Element<'_, Self::Message> {
-        let t = self.core().system_theme();
-        let cosmic = t.cosmic();
-        let cosmic_theme::Spacing {
-            space_xxxs,
-            space_xxs,
-            ..
-        } = cosmic.spacing;
-
-        let show_pane_borders =
-            self.config.show_pane_borders && self.pane_model.panes.panes.len() > 1;
-        let pane_corner_radius: iced::border::Radius = {
-            let pad = f32::from(space_xxxs) / 2.0;
-            cosmic
-                .radius_s()
-                .map(|r| if r > 0.0 { r + pad } else { 0.0 })
-                .into()
-        };
-        let pane_grid = PaneGrid::new(&self.pane_model.panes, |pane, tab_model, _is_maximized| {
-            let mut tab_column = widget::column::with_capacity(1);
-
-            if tab_model.iter().count() > 1 {
-                tab_column = tab_column.push(
-                    widget::container(
-                        widget::tab_bar::horizontal(tab_model)
-                            .enable_tab_drag(String::from("x-cosmic-term/tab"))
-                            .on_reorder(move |event| Message::ReorderTab(pane, event))
-                            .tab_drag_threshold(25.)
-                            .button_height(32)
-                            .button_spacing(space_xxs)
-                            .on_activate(Message::TabActivate)
-                            .on_close(|entity| Message::TabClose(Some(entity))),
-                    )
-                    .class(style::Container::Custom(Box::new(|theme| {
-                        let cosmic = theme.cosmic();
-                        cosmic::iced::widget::container::Style {
-                            icon_color: Some(Color::from(cosmic.background(theme.transparent).on)),
-                            text_color: Some(Color::from(cosmic.background(theme.transparent).on)),
-                            background: Some(iced::Background::Color(
-                                cosmic.background(theme.transparent).base.into(),
-                            )),
-                            border: iced::Border::default(),
-                            shadow: iced::Shadow::default(),
-                            snap: true,
-                        }
-                    })))
-                    .width(Length::Fill),
-                );
-            }
-
-            let entity = tab_model.active();
-            let entity_middle_click = tab_model.active();
-            let terminal_id = self
-                .terminal_ids
-                .get(&pane)
-                .cloned()
-                .unwrap_or_else(widget::Id::unique);
-            if let Some(terminal) = tab_model.data::<Mutex<Terminal>>(entity) {
-                let mut terminal_box = terminal_box(terminal, &self.key_binds)
-                    .id(terminal_id)
-                    .disabled(self.core.window.show_context)
-                    .on_context_menu(move |menu_state| Message::TabContextMenu(pane, menu_state))
-                    .on_middle_click(move || Message::MiddleClick(pane, Some(entity_middle_click)))
-                    .on_open_hyperlink(Some(Box::new(Message::LaunchUrl)))
-                    .on_window_focused(|| Message::WindowFocused)
-                    .on_window_unfocused(|| Message::WindowUnfocused)
-                    .opacity(if t.transparent {
-                        t.cosmic().alpha_map.blurred_alpha(t.cosmic().frosted)
-                    } else {
-                        self.config.opacity_ratio()
-                    })
-                    .padding(space_xxs)
-                    .sharp_corners(self.core.window.sharp_corners)
-                    .show_headerbar(self.config.show_headerbar)
-                    .pane_border_radius(show_pane_borders.then_some(pane_corner_radius))
-                    .border(pane_border(cosmic, t.transparent, show_pane_borders));
-
-                if self.config.focus_follow_mouse {
-                    terminal_box = terminal_box.on_mouse_enter(move || Message::MouseEnter(pane));
-                }
-
-                // If a context menu popup is active for this pane, inform the
-                // terminal_box so it will emit on_context_menu(None) on click
-                // to dismiss the popup.
-                if self.context_menu_popup.is_some() {
-                    terminal_box = terminal_box.context_menu(cosmic::iced::Point::ORIGIN);
-                }
-
-                let use_wayland_popup = {
-                    #[cfg(feature = "wayland")]
-                    {
-                        is_wayland()
-                    }
-                    #[cfg(not(feature = "wayland"))]
-                    {
-                        false
-                    }
-                };
-
-                let tab_element: Element<'_, Message> = if !use_wayland_popup {
-                    // Fallback: render context menu as an inline popover
-                    if let Some((_, popup_pane, popup_entity, ref link, _, point)) =
-                        self.context_menu_popup
-                    {
-                        if pane == popup_pane {
-                            let mut popover = widget::popover(terminal_box.context_menu(point));
-                            popover = popover
-                                .popup(menu::context_menu(
-                                    &self.config,
-                                    &self.key_binds,
-                                    popup_entity,
-                                    link.clone(),
-                                ))
-                                .position(widget::popover::Position::Point(point));
-                            popover.into()
-                        } else {
-                            terminal_box.into()
-                        }
-                    } else {
-                        terminal_box.into()
-                    }
-                } else {
-                    terminal_box.into()
-                };
-                tab_column = tab_column.push(tab_element);
-            }
-
-            //Only draw find in the currently focused pane
-            if self.find && pane == self.pane_model.focused() {
-                let find_input = widget::text_input::text_input(
-                    fl!("find-placeholder"),
-                    &self.find_search_value,
-                )
-                .id(self.find_search_id.clone())
-                .on_input(Message::FindSearchValueChanged)
-                // This is inverted for ease of use, usually in terminals you want to search
-                // upwards, which is FindPrevious
-                .on_submit(|_| {
-                    if self.modifiers.contains(Modifiers::SHIFT) {
-                        Message::FindNext
-                    } else {
-                        Message::FindPrevious
-                    }
-                })
-                .width(Length::Fixed(320.0))
-                .trailing_icon(
-                    button::custom(icon_cache_get("edit-clear-symbolic", 16))
-                        .on_press(Message::FindSearchValueChanged(String::new()))
-                        .class(style::Button::Icon)
-                        .into(),
-                );
-                let find_widget = widget::row::with_children(vec![
-                    find_input.into(),
-                    widget::tooltip(
-                        button::custom(icon_cache_get("go-up-symbolic", 16))
-                            .on_press(Message::FindPrevious)
-                            .padding(space_xxs)
-                            .class(style::Button::Icon),
-                        widget::text::body(fl!("find-previous")),
-                        widget::tooltip::Position::Top,
-                    )
-                    .into(),
-                    widget::tooltip(
-                        button::custom(icon_cache_get("go-down-symbolic", 16))
-                            .on_press(Message::FindNext)
-                            .padding(space_xxs)
-                            .class(style::Button::Icon),
-                        widget::text::body(fl!("find-next")),
-                        widget::tooltip::Position::Top,
-                    )
-                    .into(),
-                    widget::space::horizontal().into(),
-                    button::custom(icon_cache_get("window-close-symbolic", 16))
-                        .on_press(Message::Find(false))
-                        .padding(space_xxs)
-                        .class(style::Button::Icon)
-                        .into(),
-                ])
-                .align_y(Alignment::Center)
-                .padding(space_xxs)
-                .spacing(space_xxs);
-
-                tab_column = tab_column
-                    .push(widget::layer_container(find_widget).layer(cosmic_theme::Layer::Primary));
-            } else {
-                // TODO
-            }
-
-            DndDestination::for_data::<DndDrop>(tab_column, move |data, action| {
-                if let Some(data) = data {
-                    if action == DndAction::Move {
-                        Message::Drop(Some((pane, entity, data)))
-                    } else {
-                        log::warn!("unsuppported action: {:?}", action);
-                        Message::Drop(None)
-                    }
-                } else {
-                    Message::Drop(None)
-                }
-            })
-            .apply(pane_grid::Content::new)
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .on_click(Message::PaneClicked)
-        .on_resize(space_xxs, Message::PaneResized)
-        .on_drag(Message::PaneDragged);
-
-        //TODO: apply window border radius xs at bottom of window
-        if show_pane_borders {
-            // Each pane draws its own border stroke. Painting a filled
-            // container behind the grid instead would stack its alpha with the
-            // translucent panes and wash out the blurred backdrop.
-            pane_grid.spacing(space_xxxs).into()
+        let id = if self.main_window_id != window::Id::NONE {
+            self.main_window_id
         } else {
-            pane_grid.into()
-        }
+            self.active_window_id
+        };
+        self.window_view(id)
     }
 
     fn system_theme_update(
@@ -3677,7 +3876,7 @@ impl Application for App {
         struct TerminalEventSubscription;
 
         Subscription::batch([
-            event::listen_with(|event, _status, _window_id| match event {
+            event::listen_with(|event, _status, window_id| match event {
                 Event::Keyboard(KeyEvent::KeyPressed {
                     key,
                     physical_key,
@@ -3690,6 +3889,7 @@ impl Application for App {
                 Event::Mouse(MouseEvent::ButtonReleased(MouseButton::Left)) => {
                     Some(Message::CopyPrimary(None))
                 }
+                Event::Window(window::Event::Closed) => Some(Message::WindowClosed(window_id)),
                 _ => None,
             }),
             Subscription::run_with(TypeId::of::<TerminalEventSubscription>(), |_| {
@@ -3699,9 +3899,9 @@ impl Application for App {
                         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
                         output.send(Message::TermEventTx(event_tx)).await.unwrap();
 
-                        while let Some((pane, entity, event)) = event_rx.recv().await {
+                        while let Some((window_id, pane, entity, event)) = event_rx.recv().await {
                             output
-                                .send(Message::TermEvent(pane, entity, event))
+                                .send(Message::TermEvent(window_id, pane, entity, event))
                                 .await
                                 .unwrap();
                         }

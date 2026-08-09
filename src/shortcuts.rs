@@ -449,6 +449,9 @@ fn fallback_shortcuts() -> Shortcuts {
     bind!([Ctrl, Shift], "C", Copy);
     bind!([Ctrl], "c", CopyOrSigint);
     bind!([Ctrl, Shift], "F", Find);
+    #[cfg(target_os = "macos")]
+    bind!([Super], "N", WindowNew);
+    #[cfg(not(target_os = "macos"))]
     bind!([Ctrl, Shift], "N", WindowNew);
     bind!([Ctrl, Shift], "Q", WindowClose);
     bind!([Ctrl, Shift], "T", TabNew);

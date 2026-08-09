@@ -17,7 +17,7 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape, NamedColor, Rgb},
 };
 use cosmic::{
-    iced::{advanced::graphics::text::font_system, mouse::ScrollDelta},
+    iced::{advanced::graphics::text::font_system, mouse::ScrollDelta, window},
     widget::{pane_grid, segmented_button},
 };
 use cosmic_text::{
@@ -96,15 +96,16 @@ impl From<Size> for WindowSize {
 
 #[derive(Clone)]
 pub struct EventProxy(
+    window::Id,
     pane_grid::Pane,
     segmented_button::Entity,
-    mpsc::UnboundedSender<(pane_grid::Pane, segmented_button::Entity, Event)>,
+    mpsc::UnboundedSender<(window::Id, pane_grid::Pane, segmented_button::Entity, Event)>,
 );
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         //TODO: handle error
-        let _ = self.2.send((self.0, self.1, event));
+        let _ = self.3.send((self.0, self.1, self.2, event));
     }
 }
 
@@ -267,9 +268,10 @@ impl Terminal {
     //TODO: error handling
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        window_id: window::Id,
         pane: pane_grid::Pane,
         entity: segmented_button::Entity,
-        event_tx: mpsc::UnboundedSender<(pane_grid::Pane, segmented_button::Entity, Event)>,
+        event_tx: mpsc::UnboundedSender<(window::Id, pane_grid::Pane, segmented_button::Entity, Event)>,
         config: Config,
         options: Options,
         app_config: &AppConfig,
@@ -321,15 +323,14 @@ impl Terminal {
             cell_width,
             cell_height,
         };
-        let event_proxy = EventProxy(pane, entity, event_tx);
+        let event_proxy = EventProxy(window_id, pane, entity, event_tx);
         let term = Arc::new(FairMutex::new(Term::new(
             config,
             &size,
             event_proxy.clone(),
         )));
 
-        let window_id = 0;
-        let pty = tty::new(&options, size.into(), window_id)?;
+        let pty = tty::new(&options, size.into(), 0)?;
         #[cfg(not(windows))]
         let shell_pid = Some(pty.child().id());
         #[cfg(windows)]
