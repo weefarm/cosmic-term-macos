@@ -849,7 +849,9 @@ impl App {
     }
 
     fn state_for_view(&self, id: window::Id) -> (&TerminalPaneGrid, &HashMap<pane_grid::Pane, widget::Id>) {
-        if id == self.active_window_id {
+        if id == self.active_window_id
+            || (self.is_placeholder_window(self.active_window_id) && !self.windows.contains_key(&id))
+        {
             (&self.pane_model, &self.terminal_ids)
         } else {
             let state = self.windows.get(&id).unwrap();
@@ -3819,6 +3821,8 @@ impl Application for App {
         if self.windows.contains_key(&window_id)
             || window_id == self.main_window_id
             || window_id == self.active_window_id
+            || self.is_placeholder_window(self.main_window_id)
+            || self.is_placeholder_window(self.active_window_id)
         {
             let focused = self.core.focused_window() == Some(window_id);
             let view = self.window_view(window_id);
