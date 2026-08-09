@@ -450,15 +450,28 @@ fn fallback_shortcuts() -> Shortcuts {
     bind!([Ctrl], "c", CopyOrSigint);
     bind!([Ctrl, Shift], "F", Find);
     #[cfg(target_os = "macos")]
-    bind!([Super], "N", WindowNew);
+    {
+        bind!([Super], "n", WindowNew);
+        bind!([Super], "q", WindowClose);
+        bind!([Super], "t", TabNew);
+        bind!([Super], "w", TabClose);
+        bind!([Super], "c", Copy);
+        bind!([Super], "v", Paste);
+        bind!([Super], "f", Find);
+        bind!([Super], ",", Settings);
+    }
     #[cfg(not(target_os = "macos"))]
-    bind!([Ctrl, Shift], "N", WindowNew);
-    bind!([Ctrl, Shift], "Q", WindowClose);
-    bind!([Ctrl, Shift], "T", TabNew);
-    bind!([Ctrl, Shift], "V", Paste);
+    {
+        bind!([Ctrl, Shift], "N", WindowNew);
+        bind!([Ctrl, Shift], "Q", WindowClose);
+        bind!([Ctrl, Shift], "T", TabNew);
+        bind!([Ctrl, Shift], "W", TabClose);
+        bind!([Ctrl, Shift], "C", Copy);
+        bind!([Ctrl, Shift], "V", Paste);
+        bind!([Ctrl, Shift], "F", Find);
+        bind!([Ctrl], ",", Settings);
+    }
     bind!([Shift], "Insert", PastePrimary);
-    bind!([Ctrl, Shift], "W", TabClose);
-    bind!([Ctrl], ",", Settings);
     bind!([], "F11", ToggleFullscreen);
 
     // Ctrl+Alt+D splits horizontally, Ctrl+Alt+R splits vertically, Ctrl+Shift+X maximizes split
@@ -486,10 +499,20 @@ fn fallback_shortcuts() -> Shortcuts {
     bind!([Ctrl, Shift], "9", TabActivate8);
 
     // Ctrl+0, Ctrl+-, and Ctrl+= are not special keys for terminals and are free to use
-    bind!([Ctrl], "0", ZoomReset);
-    bind!([Ctrl], "-", ZoomOut);
-    bind!([Ctrl], "=", ZoomIn);
-    bind!([Ctrl], "+", ZoomIn);
+    #[cfg(target_os = "macos")]
+    {
+        bind!([Super], "0", ZoomReset);
+        bind!([Super], "-", ZoomOut);
+        bind!([Super], "=", ZoomIn);
+        bind!([Super], "+", ZoomIn);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        bind!([Ctrl], "0", ZoomReset);
+        bind!([Ctrl], "-", ZoomOut);
+        bind!([Ctrl], "=", ZoomIn);
+        bind!([Ctrl], "+", ZoomIn);
+    }
 
     // Ctrl+Arrows and Ctrl+HJKL move between splits
     bind!([Ctrl, Shift], "ArrowLeft", PaneFocusLeft);
